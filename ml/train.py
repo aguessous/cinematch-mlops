@@ -13,6 +13,11 @@ from sqlalchemy import create_engine
 import logging
 import warnings
 
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["IMPLICIT_NO_CHECK_BLAS"] = "1"
+
+from implicit.als import AlternatingLeastSquares
+
 # Ignorer les warnings spécifiques
 warnings.filterwarnings("ignore", category=UserWarning, module='implicit')
 
