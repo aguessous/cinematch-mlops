@@ -1,0 +1,94 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cinematch
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [cinematch-net]
+    ports: ["5432:5432"]
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports: ["5050:80"]
+    networks: [cinematch-net]
+    depends_on: [db]
+
+  mlflow:
+    build: 
+      context: ./docker
+      dockerfile: mlflow.Dockerfile
+    image: cinematch-mlflow
+    command:
+    - mlflow
+    - server
+    - --backend-store-uri
+    - postgresql://postgres:postgres@db:5432/cinematch
+    - --default-artifact-root
+    - /mlflow/artifacts
+    - --host
+    - 0.0.0.0
+    ports: ["5000:5000"]
+    volumes:
+      - mlruns:/mlflow
+    networks: [cinematch-net]
+    depends_on: [db]
+
+  trainer:
+    build:
+      context: .
+      dockerfile: ./docker/trainer.Dockerfile
+    image: cinematch-trainer
+    command: python ml/train.py
+    volumes:
+      - mlruns:/mlflow
+      - ./data:/app/data
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      POSTGRES_URI: postgresql://postgres:postgres@db:5432/cinematch
+    networks: [cinematch-net]
+    depends_on: [db, mlflow]
+
+  api:
+    build: ./api
+    image: cinematch-api
+    ports: ["8000:8000"]
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      POSTGRES_URI: postgresql://postgres:postgres@db:5432/cinematch
+    networks: [cinematch-net]
+    depends_on: [mlflow, trainer]
+
+  ui:
+    build: ./ui
+    image: cinematch-ui
+    ports: ["8501:8501"]
+    environment:
+      API_URL: http://api:8000
+      TMDB_API_KEY: ${TMDB_API_KEY}
+    networks: [cinematch-net]
+    depends_on: [api]
+
+  portainer:
+    image: portainer/portainer-ce
+    ports: ["9000:9000"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks: [cinematch-net]
+
+volumes:
+  pgdata:
+  mlruns:
+  portainer_data:
+
+networks:
+  cinematch-net:
+    driver: bridge

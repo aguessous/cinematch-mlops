@@ -1,0 +1,44 @@
+name: 🚀 Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Deploy to server
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd /app/cinematch-mlops
+          git pull origin main
+          
+          # Update images
+          docker compose pull
+          
+          # Restart services
+          docker compose down
+          docker compose up -d
+          
+          # Health check
+          sleep 30
+          curl -f http://localhost:8000/health || exit 1
+          curl -f http://localhost:8501 || exit 1
+          
+          echo "🎉 Deployment successful!"
