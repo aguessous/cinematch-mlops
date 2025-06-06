@@ -63,6 +63,8 @@ services:
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       POSTGRES_URI: postgresql://postgres:postgres@db:5432/cinematch
+    volumes:                       
+    - mlruns:/mlflow
     networks: [cinematch-net]
     depends_on: [mlflow, trainer]
 

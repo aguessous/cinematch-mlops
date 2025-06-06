@@ -188,7 +188,7 @@ def main():
                     color='score',
                     color_continuous_scale='viridis'
                 )
-                fig_bar.update_xaxis(tickangle=45)
+                fig_bar.update_xaxes(tickangle=45)
                 st.plotly_chart(fig_bar, use_container_width=True)
             
             with col2:

@@ -12,6 +12,33 @@ from typing import List, Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+MODEL_NAME = "cinematch-recommender"
+MODEL_ALIAS = "champion"
+
+from mlflow.exceptions import MlflowException   # ← import en plus
+
+def load_model_from_registry():
+    """
+    Tente de charger le modèle cinematch‑recommender@champion.
+    Renvoie l'objet modèle ou None s'il n'existe pas encore.
+    """
+    try:
+        uri = f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
+        logger.info(f"Tentative de chargement via l'alias : {uri}")
+        return mlflow.pyfunc.load_model(uri)
+    except MlflowException as e:
+        logger.warning(f"Alias '{MODEL_ALIAS}' indisponible ({e_alias})")
+
+        try:
+            uri = f"models:/{MODEL_NAME}/Production"
+            logger.info(f"Tentative de chargement via le stage : {uri}")
+            return mlflow.pyfunc.load_model(uri)
+
+        except (MlflowException, Exception) as e_stage:
+            logger.warning(f"Aucune version en Production ({e_stage})")
+            return None
+
+
 app = FastAPI(
     title="CineMatch API",
     description="Système de recommandation de films",
@@ -51,7 +78,13 @@ async def startup_event():
         mlflow_uri = os.getenv('MLFLOW_TRACKING_URI', 'http://mlflow:5000')
         mlflow.set_tracking_uri(mlflow_uri)
         
-        model = mlflow.pyfunc.load_model("models:/cinematch-recommender/Production")
+        model = load_model_from_registry()          # ← nouvelle fonction
+        if model:
+            logger.info("Modèle chargé depuis MLflow")
+        else:
+            logger.warning("Pas encore de modèle disponible.")
+        
+        # model = mlflow.pyfunc.load_model("models:/cinematch-recommender@champion")
         logger.info("Modèle chargé depuis MLflow")
     except Exception as e:
         logger.error(f"Erreur chargement modèle: {e}")
@@ -75,6 +108,12 @@ async def health_check():
 
 @app.get("/recommend/{user_id}")
 async def get_recommendations(user_id: int, n: int = 10):
+    global model
+    if model is None:                          # 1re tentative avion
+        model = load_model_from_registry()     # ← recharge à chaud
+    if model is None:
+        raise HTTPException(503, detail="Modèle non disponible")
+    
     if model is None:
         raise HTTPException(status_code=503, detail="Modèle non disponible")
     
@@ -124,60 +163,71 @@ async def get_recommendations(user_id: int, n: int = 10):
         logger.error(f"Erreur recommandation pour user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+from sqlalchemy import text
+
 def log_predictions(user_id: int, recommendations: List[dict]):
     """Log des prédictions en base pour monitoring"""
-    try:
-        timestamp = datetime.now()
-        
+    if not engine or not recommendations:
+        return
+
+    timestamp = datetime.now()
+
+    insert_sql = text("""
+        INSERT INTO predictions (timestamp, user_id, movie_id, score, model_version)
+        VALUES (:timestamp, :user_id, :movie_id, :score, :model_version)
+    """)
+
+    with engine.begin() as conn:              # ouverture + commit implicite
         for rec in recommendations:
-            query = text("""
-                INSERT INTO predictions (timestamp, user_id, movie_id, score, model_version)
-                VALUES (:timestamp, :user_id, :movie_id, :score, :model_version)
-            """)
-            
-            engine.execute(query, {
-                'timestamp': timestamp,
-                'user_id': user_id,
-                'movie_id': rec['movie_id'],
-                'score': rec['score'],
-                'model_version': 'v1.0'
-            })
-            
-    except Exception as e:
-        logger.error(f"Erreur logging prédictions: {e}")
+            conn.execute(
+                insert_sql,
+                {
+                    "timestamp": timestamp,
+                    "user_id": user_id,
+                    "movie_id": rec["movie_id"],
+                    "score": rec["score"],
+                    "model_version": "v13"    # ou la version courante
+                },
+            )
+
+
+from sqlalchemy import text
+from sqlalchemy.engine import Row
 
 @app.get("/stats")
 async def get_stats():
-    """Statistiques de l'API"""
-    if not engine:
+    """Statistiques agrégées sur les 24 dernières heures."""
+    if engine is None:
         raise HTTPException(status_code=503, detail="Base de données non disponible")
-    
+
+    stats_sql = text("""
+        SELECT 
+            COUNT(*)                     AS total_predictions,
+            COUNT(DISTINCT user_id)      AS unique_users,
+            COUNT(DISTINCT movie_id)     AS unique_movies,
+            AVG(score)                   AS avg_score
+        FROM predictions
+        WHERE timestamp > NOW() - INTERVAL '24 hours'
+    """)
+
     try:
-        # Statistiques générales
-        stats_query = text("""
-            SELECT 
-                COUNT(*) as total_predictions,
-                COUNT(DISTINCT user_id) as unique_users,
-                COUNT(DISTINCT movie_id) as unique_movies,
-                AVG(score) as avg_score
-            FROM predictions
-            WHERE timestamp > NOW() - INTERVAL '24 hours'
-        """)
-        
-        result = engine.execute(stats_query).fetchone()
-        
+        with engine.connect() as conn:               # ← plus d'engine.execute
+            row: Row = conn.execute(stats_sql).one()
+
         return {
             "last_24h": {
-                "total_predictions": result[0],
-                "unique_users": result[1], 
-                "unique_movies": result[2],
-                "avg_score": float(result[3]) if result[3] else 0
+                "total_predictions": row.total_predictions,
+                "unique_users":     row.unique_users,
+                "unique_movies":    row.unique_movies,
+                "avg_score":        float(row.avg_score or 0)
             }
         }
-        
+
     except Exception as e:
         logger.error(f"Erreur stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 if __name__ == "__main__":
     import uvicorn
